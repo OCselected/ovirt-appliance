@@ -1,0 +1,100 @@
+#!/usr/bin/bash
+
+set -ex
+# Kill child processes on exit
+trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
+
+usage() {
+echo "Usage: $0 <distro> <releasever> <kickstart> [<dstimage> [<disksize-in-mb>]]"
+}
+
+DISTRO=$1
+RELEASEVER=$2
+KICKSTART=$3
+DISK_NAME=$4
+DISK_SIZE=$5
+
+VM_RAM=${6:-2048}
+VM_SMP=${7:-4}
+
+[[ -f $KICKSTART ]]
+[[ ! -f $DISK_NAME ]]
+
+[[ -z "$DISK_SIZE" ]] && egrep "^part.*--grow" $KICKSTART && exit 4
+[[ -z "$DISK_SIZE" ]] && DISK_SIZE=$(( 128 + $(sed -n "/^part / s/.*size[ =]\([0-9]\+\).*/\1/ p" $KICKSTART) )) # Assumption: One partition
+[[ -n "$DISK_SIZE" ]]
+
+MIRRORS=
+
+if [[ "$DISTRO" = "fedora" ]];
+then
+  MIRRORS="https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-$RELEASEVER&arch=x86_64"
+  [[ "$RELEASEVER" = "21" ]] && MIRRORS="https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-install-$RELEASEVER&arch=x86_64" || :
+fi
+
+if [[ "$DISTRO" = "centos" ]];
+then
+  CENTOS_URL="http://mirror.centos.org/centos/7.1.1503/os/x86_64/"
+  MIRRORS="http://mirrorlist.centos.org/?repo=os&release=$RELEASEVER&arch=x86_64"
+fi
+
+[[ -z $MIRRORS ]] && exit 3
+
+mirrorcurl() {
+  [[ -f $(basename $1) ]] && return
+  curl --location --fail -s "$MIRRORS" \
+  | sed -n 's/Everything/Fedora/ ; /^ht/ p' \
+  | while read BURL; do URL=$BURL$1 ; echo Using $URL ; curl --fail -L -O $URL && break ; done ; test -f $(basename $1)
+}
+
+
+mirrorcurl images/pxeboot/vmlinuz
+mirrorcurl images/pxeboot/initrd.img
+mirrorcurl images/pxeboot/upgrade.img
+mirrorcurl LiveOS/squashfs.img
+
+rm -f .treeinfo
+mirrorcurl .treeinfo
+echo "Adjusting squashfs image path, so anaconda finds it"
+# Anaconda uses the .treeinfo file to find stuff
+# Let the squashfs point to the PWD, not in some subdir
+sed -i -e "s#=.*images/pxeboot/#= #" \
+       -e "s#=.*LiveOS/#= #" \
+       .treeinfo
+
+[[ $KICKSTART != $(basename $KICKSTART) ]] && ln -fvs $KICKSTART $(basename $KICKSTART)
+
+PYPORT=$(( 50000 + $RANDOM % 15000 ))
+VNCPORT=$(( $RANDOM % 1000 ))
+APPEND="console=ttyS0 quiet"
+APPEND+=" cmdline inst.cmdline inst.ks=http://10.0.2.2:$PYPORT/$(basename $KICKSTART) inst.stage2=http://10.0.2.2:$PYPORT/"
+APPEND+=" $QEMU_APPEND"
+
+sed -i "s#@HOST_HTTP@#http://10.0.2.2:$PYPORT#" $KICKSTART
+if [[ -n "$http_proxy" ]];
+then
+  sed -i "/--proxy/! s#^\(url\|repo\) #\1 --proxy=$http_proxy #" "$KICKSTART"
+  sed -i "/^export http_proxy/d ;  s#%post#%post\\nexport http_proxy=$http_proxy#" "$KICKSTART"
+else
+  sed -i "s/\(.*\) --proxy=\S\+\(.*\)/\1\2/" "$KICKSTART"
+  sed -i "/^export http_proxy/d" "$KICKSTART"
+fi
+
+python -m SimpleHTTPServer $PYPORT &
+
+qemu-img create -f qcow2 $DISK_NAME ${DISK_SIZE}M
+
+[[ "$(qemu-system-x86_64 -version)" =~ "version 2." ]] && QEMU_DISCARD="discard=on,"
+qemu-system-x86_64 \
+	-enable-kvm \
+	-vnc 0.0.0.0:$VNCPORT \
+	-serial stdio \
+	-smp $VM_SMP \
+	-m $VM_RAM \
+	-drive if=virtio,${QEMU_DISCARD}file=$DISK_NAME \
+	-net user -net nic \
+	-kernel vmlinuz \
+	-initrd initrd.img \
+	-device virtio-serial \
+	-chardev file,id=logfile,path=anaconda.log -device virtserialport,name=org.fedoraproject.anaconda.log.0,chardev=logfile \
+	-append "$APPEND"

@@ -1,0 +1,316 @@
+#!/usr/bin/env python
+# encoding: utf-8
+
+#   Copyright 2012 Red Hat, Inc.
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
+import sys
+import logging
+import signal
+import os
+import json
+import pprint
+from time import asctime, localtime
+from imgfac.Singleton import Singleton
+from imgfac.ApplicationConfiguration import ApplicationConfiguration
+from imgfac.BuildDispatcher import BuildDispatcher
+from imgfac.PluginManager import PluginManager
+from imgfac.PersistentImageManager import PersistentImageManager
+from imgfac.Builder import Builder
+
+try:
+    from pygments import highlight
+    try: # JSONLexer was renamed to JsonLexer - https://bitbucket.org/birkenfeld/pygments-main/src/ec8ce8ad7bc4/pygments/lexers/_mapping.py
+        from pygments.lexers import JSONLexer
+    except: # To keep compatibility with the older versions of pygments
+        from pygments.lexers import JsonLexer as JSONLexer
+    from pygments.formatters import TerminalFormatter
+    PYGMENT = True
+except:
+    PYGMENT = False
+
+# Monkey patch for guestfs threading issue
+# BZ 790528
+# TODO: Remove at some point when the upstream fix is in our supported platforms
+from imgfac.ReservationManager import ReservationManager
+from guestfs import GuestFS as _GuestFS
+
+class GuestFS(_GuestFS):
+    def launch(self):
+        res_mgr = ReservationManager()
+        res_mgr.get_named_lock("libguestfs_launch")
+        try:
+            _GuestFS.launch(self)
+        finally:
+            res_mgr.release_named_lock("libguestfs_launch")
+
+import guestfs
+guestfs.GuestFS = GuestFS
+
+
+class Application(Singleton):
+
+    def __init__(self):
+        pass
+
+    def _singleton_init(self):
+        super(Application, self)._singleton_init()
+        logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)s %(name)s thread(%(threadName)s) Message: %(message)s')
+        self.log = logging.getLogger('%s.%s' % (__name__, self.__class__.__name__))
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        self.app_config = ApplicationConfiguration().configuration
+        self.setup_logging()
+        # by setting TMPDIR here we make sure that libguestfs
+        # (imagefactory -> oz -> libguestfs) uses the temporary directory of
+        # the user's choosing
+        os.putenv('TMPDIR', self.app_config['tmpdir'])
+        self.plugin_mgr = PluginManager(self.app_config['plugins'])
+        self.plugin_mgr.load()
+
+    def setup_logging(self):
+        logger = logging.getLogger()
+        if (self.app_config['output'] != 'log'):
+            currhandler = logger.handlers[0]  # stdout is the only handler initially
+            filehandler = logging.FileHandler('/var/log/imagefactory.log')
+            formatter = logging.Formatter('%(asctime)s %(levelname)s %(name)s thread(%(threadName)s) Message: %(message)s')
+            filehandler.setFormatter(formatter)
+            logger.addHandler(filehandler)
+            logger.removeHandler(currhandler)
+            self.log = logging.getLogger('%s.%s' % (__name__, self.__class__.__name__))
+        # Considerably increases the logging output...
+        if (self.app_config['debug']):
+            logging.getLogger('').setLevel(logging.DEBUG)
+            ### Use FaultHandler if present...
+            # Mark the start of this run in our stderr/stdout debug redirect
+            #sys.stderr.write("%s - starting factory process %d\n" % (asctime(localtime()), os.getpid()))
+            sys.stderr.flush()
+            # Import and activate faulthandler if it exists
+            try:
+                import faulthandler
+                logging.debug("Enabling faulthandler")
+                faultfile = open("/var/log/imagefactory.log-faulthandler", "a")
+                faultfile.write("%s - starting factory process %d\n" % (asctime(localtime()), os.getpid()))
+                faultfile.flush()
+                faulthandler.enable(file=faultfile, all_threads = True)
+                logging.debug("Enabled faulthandler")
+            except:
+                logging.debug("Unable to find python module, faulthandler... multi-thread tracebacks will not be available. See http://pypi.python.org/pypi/faulthandler/ for more information.")
+                pass
+        elif (self.app_config['verbose']):
+            logging.getLogger('').setLevel(logging.INFO)
+
+    def signal_handler(self, signum, stack):
+        if (signum == signal.SIGTERM):
+            logging.warn('caught signal SIGTERM, stopping...')
+
+            # Run the abort() method in all running builders
+            # TODO: Find some way to regularly purge non-running builders from the registry
+            #       or replace it with something else
+            builder_dict = BuildDispatcher().builders
+            for builder_id in builder_dict:
+                # If the build or push worker thread has already exited we do nothing
+                # builder classes should always cleanup before exiting the thread-starting methods
+                if builder_dict[builder_id].builder_thread and builder_dict[builder_id].builder_thread.isAlive():
+                    try:
+                        logging.debug("Executing abort method for builder id (%s)" % (builder_id))
+                        builder_dict[builder_id].abort()
+                    except Exception as e:
+                        logging.warning("Got exception when attempting to abort build id (%s) during shutdown" % (builder_id))
+                        logging.exception(e)
+
+            sys.exit(0)
+
+    def _get_provider(self, provider):
+        # This allows people to specify widely known EC2 provider names directly on the CLI
+        # by prepending them with an @
+        # TODO: Make this cleaner perhaps
+        # If provider starts with @ interpret the remaining string literally
+        if not provider:
+            return None
+        elif provider[0] == '@':
+            return provider[1:]
+        # If not, try to read it as a file
+        else:
+            f = open(provider)
+            ret_provider = f.read().rstrip()
+            f.close()
+            return ret_provider
+
+    def _get_credentials(self, credentials_file):
+        # This returns the contents of the credentials_file
+        # If credentials file is not provided return None
+        if not credentials_file:
+            return None
+        # If credentials file is provided, try to read contents
+        else:
+            ret_credentials = credentials_file.read().rstrip()
+            credentials_file.close()
+            return ret_credentials
+
+    def main(self):
+        command = self.app_config['command']
+        returnval = {}
+        thread = None
+        image = None
+
+        parameters_file = self.app_config.get('parameters')
+        if(parameters_file):
+            try:
+                parameters = json.loads(parameters_file.read().rstrip())
+            except:
+                logging.error("Unable to read JSON from file provided in --parameters")
+                sys.exit(1)
+        else:
+            parameters={ }
+
+        # Note that this means individually specified parameters or file-parameters will
+        # override what is in the original --parameters JSON file if it exists
+        if self.app_config.get('parameter'):
+            for parpair in self.app_config.get('parameter'):
+                parameters[parpair[0]] = parpair[1]
+
+        if self.app_config.get('file_parameter'):
+            for parpair in self.app_config.get('file_parameter'):
+                try:
+                    parameters[parpair[0]] = open(parpair[1]).read()
+                except:
+                    logging.error("Unable to read file %s referenced in --file-parameter argument" % (parpair[1]))
+                    sys.exit(1)
+
+        logging.debug("Parameters are:")
+        logging.debug("\n%s" % (pprint.pformat(parameters)))
+
+        if(command in ('base_image', 'target_image', 'provider_image')):
+            template = None
+            tdl_file = self.app_config.get('template')
+            if(tdl_file):
+                template = tdl_file.read()
+
+            if(command == 'base_image'):
+                builder = BuildDispatcher().builder_for_base_image(template=template,
+                                                                   parameters=parameters)
+                image = builder.base_image
+                thread = builder.base_thread
+            elif(command == 'target_image'):
+                builder = BuildDispatcher().builder_for_target_image(target=self.app_config['target'],
+                                                                     image_id=self.app_config.get('id'),
+                                                                     template=template,
+                                                                     parameters=parameters)
+                image = builder.target_image
+                thread = builder.target_thread
+            elif(command == 'provider_image'):
+                # This is a convenience argument for the CLI - Without it users are forced to pass in an entire JSON file
+                # just to select the snapshot style of build - This argument is always present in provider_image invocations
+                # and defaults to false.  Do not override a pre-existing snapshot value if it is present in parameters
+                if not 'snapshot' in parameters:
+                    parameters['snapshot'] = self.app_config.get('snapshot')
+                provider = self._get_provider(self.app_config['provider'])
+                credentials = self._get_credentials(self.app_config.get('credentials'))
+                builder = BuildDispatcher().builder_for_provider_image(provider=provider,
+                                                                        credentials=credentials,
+                                                                        target=self.app_config.get('target'),
+                                                                        image_id=self.app_config.get('id'),
+                                                                        template=template,
+                                                                        parameters=parameters)
+                image = builder.provider_image
+                if builder.push_thread:
+                    thread = builder.push_thread
+                else:
+                    thread = builder.snapshot_thread
+
+            for key in image.metadata():
+                returnval[key] = getattr(image, key, None)
+
+        elif(command == 'images'):
+            fetch_spec = json.loads(self.app_config['fetch_spec'])
+            fetched_images = PersistentImageManager.default_manager().images_from_query(fetch_spec)
+            images = list()
+            for image in fetched_images:
+                item = {}
+                for key in image.metadata():
+                    item[key] = getattr(image, key, None)
+                images.append(item)
+            if(len(images) > 1):
+                returnval['images'] = images
+            else:
+                try:
+                    returnval = images[0]
+                except IndexError:
+                    if(self.app_config['debug']):
+                        print "No images matching fetch specification (%s) found." % (self.app_config['fetch_spec'])
+                except Exception as e:
+                    print e
+                    sys.exit(1)
+
+        elif(command == 'delete'):
+            try:
+                image_id = self.app_config['id']
+                provider = self._get_provider(self.app_config['provider'])
+                image = PersistentImageManager.default_manager().image_with_id(image_id)
+                if(not image):
+                    print ('No image found with id: %s' % image_id)
+                    return
+                builder = Builder()
+                builder.delete_image(provider=provider,
+                                     credentials=self.app_config.get('credentials').read().rstrip(),
+                                     target=self.app_config.get('target'),
+                                     image_object=image,
+                                     parameters=parameters)
+                print('Deleting image with id %s' % image_id)
+                builder.delete_thread.join()
+                return
+            except Exception as e:
+                self.log.exception(e)
+                print('Failed to delete image %s, see the log for exception details.' % image_id)
+        elif(command == 'plugins'):
+                plugin_id = self.app_config.get('id')
+                returnval = PluginManager().plugins[plugin_id].copy() if plugin_id else PluginManager().plugins.copy()
+
+        formatted_returnval = json.dumps(returnval, indent=2)
+
+        if(self.app_config['output'] == 'json'):
+            if(PYGMENT and not self.app_config['raw']):
+                print highlight(formatted_returnval, JSONLexer(), TerminalFormatter())
+            else:
+                if(self.app_config['debug'] and not self.app_config['raw']):
+                    print('Python module "pygments" found. Install this module if you want syntax colorization.')
+                print(formatted_returnval)
+
+        if thread:
+            # Wait for the primary worker thread to complete if it exists
+            thread.join()
+
+        if (image and (self.app_config['output'] == 'log')):
+            if image.status == "FAILED":
+                print
+                print "Image build FAILED with error: %s" % (image.status_detail['error'])
+                sys.exit(1)
+            print
+            print "============ Final Image Details ============"
+            print "UUID: %s" % (image.identifier)
+            print "Type: %s" % (command)
+            print "Image filename: " + image.data
+            if command == "provider_image" and image.status == "COMPLETE":
+                print "Image ID on provider: %s" % (image.identifier_on_provider)
+            if image.status == "COMPLETE":
+                print "Image build completed SUCCESSFULLY!"
+                sys.exit(0)
+            else:
+                print "WARNING - Reached end of build with an unexpected status - this should not happen"
+                print "Status: %s" % (image.status)
+                print "Status Details: %s" % (image.status_detail)
+                sys.exit(1)
+
+if __name__ == "__main__":
+    sys.exit(Application().main())

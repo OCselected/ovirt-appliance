@@ -1,0 +1,396 @@
+# Some Openstack supporting packages from EPEL have been removed due to updated
+# deps that override RHEL and, thus, violate EPEL rules.  We would like to 
+# eventually support these features as part of an EL6 and EL7 set of factory
+# plugin packages in RDO.  Until this is sorted out we must disable things when
+# building on RHEL.
+# TODO: If we end up building as part of RDO either remove this for RDO
+# SPEC builds or find a way to detect an RDO build and automagically negate this
+%define include_openstack %{?rhel:0}%{!?rhel:1}
+
+%global auto_register_macro_post() # create it if it doesn't already exist as a link \
+# If it is an existing file other than a link, do nothing \
+[ -L %{_sysconfdir}/imagefactory/plugins.d/%1.info ] || \
+[ -e %{_sysconfdir}/imagefactory/plugins.d/%1.info ] || \
+ln -s %{python_sitelib}/imagefactory_plugins/%1/%1.info %{_sysconfdir}/imagefactory/plugins.d/%1.info \
+exit 0 
+
+%global auto_register_macro_postun() if [ "\$1" = "0" ]; then \
+  # clean up the link if it exists - if it doesn't or if this is a regular file, do nothing \
+  [ -L %{_sysconfdir}/imagefactory/plugins.d/%1.info ] && rm -f  %{_sysconfdir}/imagefactory/plugins.d/%1.info \
+fi \
+exit 0
+
+
+Summary: Default plugins for the Image Factory system image generation tool
+Name: imagefactory-plugins
+Version: @VERSION@
+Release: @RELEASE@%{?dist}
+Source0: http://repos.fedorapeople.org/repos/aeolus/imagefactory/%{version}/tarball/%{name}-%{version}.tar.gz
+License: ASL 2.0
+Group: Applications/System
+URL: http://www.aeolusproject.org/imagefactory.html
+BuildArch: noarch
+%if 0%{?rhel} == 6
+ExcludeArch: i386 ppc64
+%endif
+BuildRequires: python2
+BuildRequires: python-setuptools
+Requires: imagefactory
+
+%description
+This is a placeholder top level package for a collection of plugins for the 
+Image Factory cloud system image generation tool.
+
+imagefactory allows the creation of system images for multiple virtualization
+and cloud providers from a single template definition. See 
+http://aeolusproject.org/projects/imagefactory for more information.
+
+%package ovfcommon
+Summary: common utilities to manipulate ovf-related objects
+License: ASL 2.0
+Requires: oz >= 0.7.0
+Requires: imagefactory-plugins
+
+%description ovfcommon
+This pseudo-plugin is used to provide common OVF functionality to other 
+plugins.
+
+%package OVA
+Summary: Cloud plugin for generating OVA archives
+License: ASL 2.0
+Requires: oz >= 0.7.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugins-ovfcommon
+Requires: imagefactory-plugin-api = 1.0
+
+%description OVA
+This Cloud plugin allows users to specify a Base Image to generate an OVA
+archive from.
+
+%package IndirectionCloud
+Summary: Cloud plugin for allowing images to modify other images
+License: ASL 2.0
+Requires: oz >= 0.12.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description IndirectionCloud
+This Cloud plugin allows users to specify a Base Image to use to manipulate
+another Base Image to generate a Target Image.
+
+It was originally created to produce Live CDs and other live media using an
+arbitrary  host OS and package selection for the actual media creation tools.
+
+%package TinMan
+Summary: OS plugin for Fedora
+License: ASL 2.0
+Requires: oz >= 0.12.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description TinMan
+An OS plugin to support Fedora OSes
+
+%if 0%{include_openstack}
+%package OpenStack
+Summary: Cloud plugin for OpenStack running on KVM
+License: ASL 2.0
+Requires: python-glance
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description OpenStack
+A Cloud plugin to support OpenStack running on top of KVM.
+
+%package Rackspace
+Summary: Cloud plugin for Rackspace
+License: ASL 2.0
+Requires: python-novaclient
+Requires: python-pyrax
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description Rackspace
+A Cloud plugin to support Rackspace
+
+%package Rackspace-JEOS-images
+Summary: JEOS images for various OSes to support Rackspace snapshot builds
+Requires: imagefactory-plugins-Rackspace
+
+%description Rackspace-JEOS-images
+These configuration files point to existing JEOS Image ID's on Rackspace that
+can be used to do "snapshot" style builds.
+
+%package Nova
+Summary: OS plugin that allows imagefactory to use Nova instances to build base images.
+License: ASL 2.0
+Requires: python-novaclient
+Requires: oz >= 0.12.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description Nova
+An alternative to the TinMan plugin for creating base images using an OpenStack cloud.
+%endif
+
+%package EC2
+Summary: Cloud plugin for EC2
+License: ASL 2.0
+Requires: euca2ools
+Requires: python-boto >= 2.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description EC2
+A Cloud plugin to support EC2
+
+%package EC2-JEOS-images
+Summary: JEOS images for various OSes to support EC2 snapshot builds
+Requires: imagefactory-plugins-EC2
+
+%description EC2-JEOS-images
+These configuration files point to existing JEOS AMIs on EC2 that can be used
+to do "snapshot" style builds.
+
+%if 0%{?build_mock}
+%package MockOS
+Summary: Mock OS plugin
+License: ASL 2.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description MockOS
+This plugin mimcs some of the behaviour of the RPM based OS plugins without
+actually doing a build.
+
+For testing use only.
+
+%package MockCloud
+Summary: Mock Cloud plugin
+License: ASL 2.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugin-api = 1.0
+
+%description MockCloud
+This plugin mimcs some of the behaviour of a real cloud plugin without needing
+any real external infra.
+
+For testing use only.
+
+%endif
+
+%package RHEVM
+Summary: RHEVM Cloud plugin
+License: ASL 2.0
+Requires: imagefactory-plugins
+Requires: imagefactory-plugins-ovfcommon
+Requires: ovirt-engine-sdk >= 3.1.0
+Requires: imagefactory-plugin-api = 1.0
+
+%description RHEVM
+A plugin for RHEVM "clouds"
+
+%package vSphere
+Summary: vSphere Cloud plugin
+License: ASL 2.0
+Requires: imagefactory-plugins
+Requires: python-psphere
+Requires: imagefactory-plugin-api = 1.0
+# Earlier VMDKstream is not VirtualBox compatible
+Requires: VMDKstream >= 0.3
+
+%description vSphere
+A plugin for vSphere "clouds"
+
+%package Docker
+Summary: Cloud plugin for Docker
+License: ASL 2.0
+
+%description Docker
+A Cloud plugin to support Docker
+
+%prep
+%setup -q
+
+%build
+python setup.py build
+
+%install
+python setup.py install -O1 --root=%{buildroot} --skip-build
+
+# TODO: Cleaner negative conditional
+%if 0%{?build_mock}
+%else
+rm -rf %{buildroot}%{python_sitelib}/imagefactory_plugins/MockOS
+rm -rf %{buildroot}%{python_sitelib}/imagefactory_plugins/MockCloud
+%endif
+
+%if 0%{include_openstack}
+%else
+rm -rf  %{buildroot}%{python_sitelib}/imagefactory_plugins/OpenStack
+rm -rf  %{buildroot}%{python_sitelib}/imagefactory_plugins/Nova
+rm -rf  %{buildroot}%{python_sitelib}/imagefactory_plugins/Rackspace
+rm -f  %{buildroot}%{_sysconfdir}/imagefactory/jeos_images/rackspace_fedora_jeos.conf
+rm -f  %{buildroot}%{_sysconfdir}/imagefactory/jeos_images/rackspace_rhel_jeos.conf
+%endif
+
+%post OVA
+%auto_register_macro_post OVA
+%postun OVA
+%auto_register_macro_postun OVA
+
+%post IndirectionCloud
+%auto_register_macro_post IndirectionCloud
+%postun IndirectionCloud
+%auto_register_macro_postun IndirectionCloud
+
+%post TinMan
+%auto_register_macro_post TinMan
+%postun TinMan
+%auto_register_macro_postun TinMan
+
+%if 0%{include_openstack}
+%post OpenStack
+%auto_register_macro_post OpenStack
+%postun OpenStack
+%auto_register_macro_postun OpenStack
+
+%post Rackspace
+%auto_register_macro_post Rackspace
+%postun Rackspace
+%auto_register_macro_postun Rackspace
+
+%post Nova
+%auto_register_macro_post Nova
+%postun Nova
+%auto_register_macro_postrun Nova
+%endif
+
+%post RHEVM
+%auto_register_macro_post RHEVM
+%postun RHEVM
+%auto_register_macro_postun RHEVM
+
+%post EC2
+%auto_register_macro_post EC2
+%postun EC2
+%auto_register_macro_postun EC2
+
+%if 0%{?build_mock}
+%post MockOS
+%auto_register_macro_post MockOS
+%postun MockOS
+%auto_register_macro_postun MockOS
+
+%post MockCloud
+%auto_register_macro_post MockCloud
+%postun MockCloud
+%auto_register_macro_postun MockCloud
+%endif
+
+%post vSphere
+%auto_register_macro_post vSphere
+%postun vSphere
+%auto_register_macro_postun vSphere
+
+%post Docker
+%auto_register_macro_post Docker
+%postun Docker
+%auto_register_macro_postun Docker
+
+%files
+%doc COPYING
+%dir %{python_sitelib}/imagefactory_plugins
+%{python_sitelib}/imagefactory_plugins/__init__.py*
+%{python_sitelib}/imagefactory_plugins*.egg-info
+
+%files ovfcommon
+%dir %{python_sitelib}/imagefactory_plugins/ovfcommon
+%{python_sitelib}/imagefactory_plugins/ovfcommon/*
+
+%files OVA
+%dir %{python_sitelib}/imagefactory_plugins/OVA
+%{python_sitelib}/imagefactory_plugins/OVA/*
+
+%files IndirectionCloud
+%dir %{python_sitelib}/imagefactory_plugins/IndirectionCloud
+%{python_sitelib}/imagefactory_plugins/IndirectionCloud/*
+
+%files TinMan
+%dir %{python_sitelib}/imagefactory_plugins/TinMan
+%{python_sitelib}/imagefactory_plugins/TinMan/*
+
+%if 0%{include_openstack}
+%files OpenStack
+%dir %{python_sitelib}/imagefactory_plugins/OpenStack
+%{python_sitelib}/imagefactory_plugins/OpenStack/*
+
+%files Rackspace
+%dir %{python_sitelib}/imagefactory_plugins/Rackspace
+%{python_sitelib}/imagefactory_plugins/Rackspace/*
+
+%files Rackspace-JEOS-images
+%{_sysconfdir}/imagefactory/jeos_images/rackspace_fedora_jeos.conf
+%{_sysconfdir}/imagefactory/jeos_images/rackspace_rhel_jeos.conf
+
+%files Nova
+%dir %{python_sitelib}/imagefactory_plugins/Nova
+%{python_sitelib}/imagefactory_plugins/Nova/*
+%endif
+
+%files EC2
+%dir %{python_sitelib}/imagefactory_plugins/EC2
+%{python_sitelib}/imagefactory_plugins/EC2/*
+%{_bindir}/create-ec2-factory-credentials
+
+%files EC2-JEOS-images
+%{_sysconfdir}/imagefactory/jeos_images/ec2_fedora_jeos.conf
+%{_sysconfdir}/imagefactory/jeos_images/ec2_rhel_jeos.conf
+
+%if 0%{?build_mock}
+%files MockOS
+%dir %{python_sitelib}/imagefactory_plugins/MockOS
+%{python_sitelib}/imagefactory_plugins/MockOS/*
+
+%files MockCloud
+%dir %{python_sitelib}/imagefactory_plugins/MockCloud
+%{python_sitelib}/imagefactory_plugins/MockCloud/*
+%endif
+
+%files RHEVM
+%dir %{python_sitelib}/imagefactory_plugins/RHEVM
+%{python_sitelib}/imagefactory_plugins/RHEVM/*
+
+%files vSphere
+%dir %{python_sitelib}/imagefactory_plugins/vSphere
+%{python_sitelib}/imagefactory_plugins/vSphere/*
+
+%files Docker
+%dir %{python_sitelib}/imagefactory_plugins/Docker
+%{python_sitelib}/imagefactory_plugins/Docker/*
+
+%changelog
+* Wed Jan 7 2015 Ian McLeod <imcleod@redhat.com> - 1.1.7-1
+- Upstream release 1.1.7
+- Vagrant box support added to OVA plugin
+
+* Mon Nov 24 2014 Ian McLeod <imcleod@redhat.com> - 1.1.6-2
+- Assorted fixes and features to enable rpm-ostree-toolbox integration
+
+* Tue Oct 21 2014 Ian McLeod <imcleod@redhat.com> - 1.1.6-1
+- Upstream 1.1.6 release
+
+* Wed Jul 9 2014 Steve Loranz <sloranz@redhat.com> - 1.1.6
+- Add Nova plugin
+
+* Tue May 6 2014 Ian McLeod <imcleod@redhat.com> - 1.1.5-2
+- Rebase with upstream
+- Improved parameters parsing that couples with improved parameters CLI support in core imagefactory
+- Add support for "offline" ICICLE generation in TinMan
+- Rework IndirectionCloud to work with recent Oz releases
+
+* Mon Sep 23 2013 Ian McLeod <imcleod@redhat.com> - 1.1.3-2
+- Add abort() method to TinMan plugin
+
+* Thu Aug 15 2013 Ian McLeod <imcleod@redhat.com> - 1.1.3
+- Rebase with upstream

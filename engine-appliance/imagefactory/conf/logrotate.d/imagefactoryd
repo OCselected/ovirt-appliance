@@ -1,0 +1,12 @@
+weekly
+rotate 52
+compress
+missingok
+notifempty
+
+/var/log/imagefactoryd.log {
+  sharedscripts
+  postrotate
+      /sbin/service imagefactoryd restart
+  endscript
+}
