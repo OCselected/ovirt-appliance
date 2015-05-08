@@ -60,6 +60,7 @@ set -x
 yum-config-manager --add-repo="http://download.gluster.org/pub/gluster/glusterfs/LATEST/CentOS/glusterfs-epel.repo"
 yum install -y http://plain.resources.ovirt.org/pub/yum-repo/ovirt-release35.rpm
 yum install -y ovirt-engine
+yum install -y ovirt-guest-tools
 
 #
 echo "Creating a partial answer file"

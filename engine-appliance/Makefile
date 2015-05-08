@@ -10,8 +10,10 @@
 #VM_DISK ?= 10000
 VM_DISK ?= $(shell expr 10 \* 1024)
 
-OVA_RAM ?= 16384
-OVA_CPUS ?= 4
+#OVA_RAM ?= 16384
+OVA_RAM ?= 2048
+#OVA_CPUS ?= 4
+OVA_CPUS ?= 2
 
 ARCH=x86_64
 DISTRO=centos
